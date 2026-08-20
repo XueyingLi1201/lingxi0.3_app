@@ -1,0 +1,99 @@
+name: Build Flet Android APK
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+env:
+  PYTHON_VERSION: '3.11'
+  FLUTTER_VERSION: '3.24.0'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 定位应用目录 ----
+      # 兼容两种仓库布局：
+      #   1) main.py / requirements.txt 直接放在仓库根目录
+      #   2) 整个应用文件夹被放进仓库（如 lingxi0.3_app/ 单层子目录）
+      # 若都不满足，直接给出清晰的报错提示，而不是在 pip 阶段报找不到 requirements.txt。
+      - name: Locate app directory
+        id: locate
+        run: |
+          set -e
+          if [ -f requirements.txt ]; then
+            echo "APP_DIR=." >> "$GITHUB_ENV"
+            echo "应用文件位于仓库根目录"
+          else
+            SUBDIR="$(find . -maxdepth 1 -mindepth 1 -type d ! -name .github ! -name .git | head -n1)"
+            SUBDIR_COUNT="$(find . -maxdepth 1 -mindepth 1 -type d ! -name .github ! -name .git | wc -l)"
+            if [ -n "$SUBDIR" ] && [ "$SUBDIR_COUNT" -eq 1 ] && [ -f "$SUBDIR/requirements.txt" ]; then
+              APP_DIR="$(echo "$SUBDIR" | sed 's|^\./||')"
+              echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+              echo "检测到应用文件位于子目录 $APP_DIR/（自动兼容这种布局）"
+            else
+              echo "::error::找不到 requirements.txt。请把 main.py、requirements.txt、.github 放到仓库根目录（或整个应用文件夹作为唯一的子目录）。当前仓库结构如下："
+              ls -la
+              exit 1
+            fi
+          fi
+          ls -la "$APP_DIR" | head -n 30
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r "$APP_DIR/requirements.txt"
+
+      - name: Set up site-packages for serious_python
+        run: |
+          mkdir -p "$APP_DIR/build/site-packages"
+          pip install -t "$APP_DIR/build/site-packages" -r "$APP_DIR/requirements.txt"
+          echo "SERIOUS_PYTHON_SITE_PACKAGES=$GITHUB_WORKSPACE/$APP_DIR/build/site-packages" >> "$GITHUB_ENV"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Inject API Keys (config.py)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TTS_API_KEY: ${{ secrets.TTS_API_KEY }}
+          ASR_API_KEY: ${{ secrets.ASR_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import os
+          keys = {
+              "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
+              "TTS_API_KEY": os.environ.get("TTS_API_KEY", ""),
+              "ASR_API_KEY": os.environ.get("ASR_API_KEY", ""),
+          }
+          with open(os.path.join(os.environ["APP_DIR"], "config.py"), "w", encoding="utf-8") as f:
+              for k, v in keys.items():
+                  f.write(f'{k} = "{v}"\n')
+          EOF
+
+      - name: Build APK
+        run: |
+          cd "$APP_DIR"
+          flet build apk --verbose
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lingxi-App
+          path: ${{ env.APP_DIR }}/build/apk
