@@ -272,18 +272,25 @@ def main(page: ft.Page):
             pass
     page.bgcolor = "#f5f5f5"
 
-    # 音频播放控件：优先用 flet 的 Audio，没有则回退到系统播放器
+    # 音频播放控件：延迟到第一次播放时才创建（避免在 Android 上启动时就因
+    # 空 src 等触发客户端错误）。没有可用控件时回退到系统播放器。
     audio_player = None
-    try:
-        if FletAudio is not None:
-            audio_player = FletAudio(src="")
-        elif hasattr(ft, "Audio"):
-            audio_player = ft.Audio(src="")
-        if audio_player is not None:
-            page.overlay.append(audio_player)
-    except Exception as e:
-        print(f"音频控件初始化失败，将改用系统播放器：{e}")
-        audio_player = None
+
+    def get_audio_player():
+        nonlocal audio_player
+        if audio_player is None:
+            try:
+                if FletAudio is not None:
+                    audio_player = FletAudio(src="")
+                elif hasattr(ft, "Audio"):
+                    audio_player = ft.Audio(src="")
+                if audio_player is not None:
+                    page.overlay.append(audio_player)
+                    page.update()
+            except Exception as e:
+                print(f"音频控件创建失败，将改用系统播放器：{e}")
+                audio_player = None
+        return audio_player
 
     # 录音控件：没有可用的 AudioRecorder 时，语音输入按钮会给出提示
     audio_recorder = None
@@ -303,21 +310,28 @@ def main(page: ft.Page):
                     wf.writeframes(pcm_data)
 
             played = False
-            if audio_player is not None:
+            player = get_audio_player()
+            if player is not None:
                 try:
                     src = tmp_path
                     # Android 上本地文件需要 file:// 前缀才能被播放器识别
                     if getattr(page, "platform", "") == "android" and not src.startswith("file://"):
                         src = "file://" + src.replace("\\", "/")
-                    audio_player.src = src
-                    audio_player.play()
+                    player.src = src
+                    player.play()
                     page.update()  # 关键：把 src/play 命令同步到客户端，否则不会出声
                     played = True
                 except Exception as e:
+                    status_text.value = f"播报控件出错：{e}"
+                    page.update()
                     print(f"Flet 音频播放失败，改用系统播放器：{e}")
 
             if not played:
-                play_wav_via_os(tmp_path)
+                try:
+                    play_wav_via_os(tmp_path)
+                except Exception as e:
+                    status_text.value = f"系统播放失败：{e}"
+                    page.update()
 
             async def delete_later():
                 await asyncio.sleep(5)
@@ -330,27 +344,40 @@ def main(page: ft.Page):
             print(f"播放异常：{e}")
 
     async def do_tts(text: str):
-        pcm_data, error = await tts_websocket(text)
-        if error:
-            print(f"语音失败：{error}")
-        else:
-            play_pcm_as_wav(pcm_data)
+        try:
+            pcm_data, error = await tts_websocket(text)
+            if error:
+                status_text.value = f"语音失败：{error}"
+                page.update()
+                print(f"语音失败：{error}")
+            else:
+                play_pcm_as_wav(pcm_data)
+        except Exception as e:
+            status_text.value = f"语音任务异常：{e}"
+            page.update()
+            print(f"语音任务异常：{e}")
 
     # ---------- 语音输入 ----------
     recording = [False]  # 用列表以便在闭包内修改
 
     def on_rec_result(e):
-        recording[0] = False
-        mic_btn.bgcolor = "#4a90d9"
-        mic_btn.content = ft.Text("🎤", size=18)
-        path = getattr(e, "result", None)
-        if not path or not os.path.exists(path):
-            status_text.value = "录音失败，请重试"
+        try:
+            recording[0] = False
+            mic_btn.bgcolor = "#4a90d9"
+            mic_btn.content = ft.Text("🎤", size=18)
+            path = getattr(e, "result", None)
+            if not path or not os.path.exists(path):
+                status_text.value = "录音失败，请重试"
+                page.update()
+                return
+            status_text.value = "识别中…"
             page.update()
-            return
-        status_text.value = "识别中…"
-        page.update()
-        asyncio.create_task(do_asr(path))
+            asyncio.create_task(do_asr(path))
+        except Exception as ex:
+            recording[0] = False
+            status_text.value = f"录音回调异常：{ex}"
+            page.update()
+            print(f"录音回调异常：{ex}")
 
     async def do_asr(path):
         try:
@@ -532,7 +559,10 @@ def main(page: ft.Page):
         )
         page.update()
 
-        asyncio.create_task(do_tts(reply))
+        try:
+            asyncio.create_task(do_tts(reply))
+        except Exception as e:
+            print(f"创建语音任务失败：{e}")
 
     input_row = ft.Container(
         content=ft.Row(
