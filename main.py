@@ -402,18 +402,28 @@ def main(page: ft.Page):
         send_message()  # 直接把识别结果当作消息发出（聊天框里能看到识别内容）
 
     def toggle_record():
-        if audio_recorder is None:
-            status_text.value = "当前环境没有可用的录音控件（flet-audio 或 ft.AudioRecorder）"
-            page.update()
-            return
         if not ASR_API_KEY:
             status_text.value = "未配置 ASR_API_KEY，无法语音输入（对话与播报不受影响）"
+            page.update()
+            return
+        try:
+            rec = get_audio_recorder()
+        except Exception as ex:
+            status_text.value = f"录音控件不可用：{ex}"
+            page.update()
+            return
+        if rec is None:
+            try:
+                _ver = getattr(getattr(ft, "version", None), "__version__", "?")
+            except Exception:
+                _ver = "?"
+            status_text.value = f"当前 flet 版本没有可用的录音控件（flet {_ver}，需要 ft.AudioRecorder 或 flet-audio）"
             page.update()
             return
         if not recording[0]:
             rec_path = os.path.join(tempfile.gettempdir(), "lingxi_rec_" + uuid.uuid4().hex + ".wav")
             try:
-                audio_recorder.start_recording(rec_path)
+                rec.start_recording(rec_path)
             except Exception as e:
                 status_text.value = f"开始录音失败：{e}"
                 page.update()
@@ -425,7 +435,7 @@ def main(page: ft.Page):
             page.update()
         else:
             try:
-                audio_recorder.stop_recording()
+                rec.stop_recording()
                 status_text.value = "识别中…"
                 page.update()
             except Exception as e:
@@ -435,16 +445,36 @@ def main(page: ft.Page):
                 status_text.value = f"结束录音失败：{e}"
                 page.update()
 
-    try:
-        if FletAudioRecorder is not None:
-            audio_recorder = FletAudioRecorder(audio_encode="wav", on_result=on_rec_result)
-        elif hasattr(ft, "AudioRecorder"):
-            audio_recorder = ft.AudioRecorder(audio_encode="wav", on_result=on_rec_result)
-        if audio_recorder is not None:
-            page.overlay.append(audio_recorder)
-    except Exception as e:
-        print(f"录音控件初始化失败，语音输入不可用：{e}")
-        audio_recorder = None
+    def get_audio_recorder():
+        """延迟创建录音控件（第一次点话筒时才创建）。
+        自动适配不同 flet 版本的构造参数；失败时抛出带真实原因异常。"""
+        nonlocal audio_recorder
+        if audio_recorder is None:
+            if FletAudioRecorder is not None:
+                audio_recorder = FletAudioRecorder(audio_encode="wav", on_result=on_rec_result)
+            elif hasattr(ft, "AudioRecorder"):
+                enc = "wav"
+                try:
+                    if hasattr(ft, "AudioEncoder"):
+                        enc = ft.AudioEncoder.WAV
+                except Exception:
+                    pass
+                last_err = None
+                # 依次尝试不同的构造写法，兼容 flet 各版本
+                for kw in (dict(audio_encode=enc, on_result=on_rec_result),
+                           dict(on_result=on_rec_result)):
+                    try:
+                        audio_recorder = ft.AudioRecorder(**kw)
+                        break
+                    except Exception as e:
+                        last_err = e
+                        audio_recorder = None
+                if audio_recorder is None and last_err is not None:
+                    raise RuntimeError(f"创建录音控件失败：{last_err}")
+            if audio_recorder is not None:
+                page.overlay.append(audio_recorder)
+                page.update()
+        return audio_recorder
 
     # ---------- UI 组件 ----------
     app_bar = ft.Container(
