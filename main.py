@@ -368,6 +368,8 @@ def main(page: ft.Page):
             if error:
                 show_voice_error(f"语音失败：{error}")
             else:
+                status_text.value = f"已合成语音（{len(pcm_data) // 1024}KB），播放中…"
+                page.update()
                 play_pcm_as_wav(pcm_data)
         except Exception as e:
             show_voice_error(f"语音任务异常：{e}")
