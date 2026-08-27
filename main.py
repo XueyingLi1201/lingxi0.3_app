@@ -302,6 +302,20 @@ def main(page: ft.Page):
     # 录音控件：没有可用的 AudioRecorder 时，语音输入按钮会给出提示
     audio_recorder = None
 
+    def show_voice_error(msg: str):
+        """把语音错误同时显示在状态小字和聊天区的红色气泡里，确保用户能看到。"""
+        status_text.value = msg
+        chat_display.controls.append(
+            ft.Row(
+                controls=[
+                    ft.Text(f"🔇 {msg}", size=12, color="#e53935", italic=True),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+            )
+        )
+        page.update()
+        print(msg)
+
     def play_pcm_as_wav(pcm_data: bytes):
         if not pcm_data:
             return
@@ -329,16 +343,14 @@ def main(page: ft.Page):
                     page.update()  # 关键：把 src/play 命令同步到客户端，否则不会出声
                     played = True
                 except Exception as e:
-                    status_text.value = f"播报控件出错：{e}"
-                    page.update()
+                    show_voice_error(f"播报控件出错：{e}")
                     print(f"Flet 音频播放失败，改用系统播放器：{e}")
 
             if not played:
                 try:
                     play_wav_via_os(tmp_path)
                 except Exception as e:
-                    status_text.value = f"系统播放失败：{e}"
-                    page.update()
+                    show_voice_error(f"系统播放失败：{e}")
 
             async def delete_later():
                 await asyncio.sleep(5)
@@ -354,15 +366,11 @@ def main(page: ft.Page):
         try:
             pcm_data, error = await tts_websocket(text)
             if error:
-                status_text.value = f"语音失败：{error}"
-                page.update()
-                print(f"语音失败：{error}")
+                show_voice_error(f"语音失败：{error}")
             else:
                 play_pcm_as_wav(pcm_data)
         except Exception as e:
-            status_text.value = f"语音任务异常：{e}"
-            page.update()
-            print(f"语音任务异常：{e}")
+            show_voice_error(f"语音任务异常：{e}")
 
     # ---------- 语音输入 ----------
     recording = [False]  # 用列表以便在闭包内修改
