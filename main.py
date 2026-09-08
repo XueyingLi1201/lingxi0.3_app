@@ -144,27 +144,29 @@ async def tts_websocket(text: str):
             # 1) 发送"开始连接"帧
             await websocket.send(build_frame(EVENT_START_CONNECTION, payload="{}"))
 
-            # 2) 等待服务端认证响应（EVENT_AUTH=353），认证通过后才能开始会话。
-            #    缺少这一步是语音失败的主要原因：服务端会拒绝未完成认证的会话。
-            auth_ok = False
-            for _ in range(3):
-                message = await asyncio.wait_for(websocket.recv(), timeout=10)
-                if not isinstance(message, bytes):
-                    continue
-                event, _, payload = parse_frame(message)
-                if event == EVENT_AUTH:
-                    info = {}
-                    try:
-                        info = json.loads(payload)
-                    except Exception:
-                        pass
-                    code = info.get("code", info.get("status_code", 0))
-                    if code not in (0, 200, "0", "200"):
-                        return None, f"服务端认证失败：{info}"
-                    auth_ok = True
-                    break
-            if not auth_ok:
-                return None, "未收到服务端认证响应（EVENT_AUTH=353）"
+            # 2) 认证握手（容错）：多数网关要求先收 EVENT_AUTH=353 认证帧才能开始会话，
+            #    但也有网关不发认证帧。这里最多等 6 秒：收到 353 就校验；收不到就按
+            #    旧协议继续（不致命）。收到的非认证帧先暂存，留给下面的收数循环处理。
+            pending = []
+            try:
+                message = await asyncio.wait_for(websocket.recv(), timeout=6)
+                if isinstance(message, bytes):
+                    event, _, payload = parse_frame(message)
+                    if event == EVENT_AUTH:
+                        info = {}
+                        try:
+                            info = json.loads(payload)
+                        except Exception:
+                            pass
+                        code = info.get("code", info.get("status_code", 0))
+                        if code not in (0, 200, "0", "200"):
+                            return None, f"服务端认证失败：{info}"
+                    else:
+                        pending.append(message)
+            except asyncio.TimeoutError:
+                pass  # 6 秒内无认证帧 -> 视为无需认证，继续
+            except Exception:
+                pass
 
             # 3) 开始会话
             session_id = "session-" + str(uuid.uuid4())
@@ -188,7 +190,10 @@ async def tts_websocket(text: str):
             # 5) 接收音频数据
             audio_data = b''
             while True:
-                message = await websocket.recv()
+                if pending:
+                    message = pending.pop(0)
+                else:
+                    message = await websocket.recv()
                 if not isinstance(message, bytes):
                     continue
                 event, _, payload = parse_frame(message)
