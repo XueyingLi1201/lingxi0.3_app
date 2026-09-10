@@ -321,11 +321,14 @@ def main(page: ft.Page):
         page.update()
         print(msg)
 
-    def play_pcm_as_wav(pcm_data: bytes):
+    async def play_pcm_as_wav(pcm_data: bytes):
+        """播放 PCM：依次尝试多种 src 形式，并显示实际使用的是哪一种。"""
         if not pcm_data:
+            show_voice_error("合成结果为空，没有音频可播")
             return
         tmp_path = None
         try:
+            import base64 as _b64
             import wave
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp_path = tmp.name
@@ -334,38 +337,59 @@ def main(page: ft.Page):
                     wf.setsampwidth(2)
                     wf.setframerate(24000)
                     wf.writeframes(pcm_data)
+            with open(tmp_path, "rb") as f:
+                wav_bytes = f.read()
+            file_url = "file://" + tmp_path.replace("\\", "/")
+            b64_uri = "data:audio/wav;base64," + _b64.b64encode(wav_bytes).decode()
 
-            played = False
             player = get_audio_player()
-            if player is not None:
-                try:
-                    src = tmp_path
-                    # Android 上本地文件需要 file:// 前缀才能被播放器识别
-                    if getattr(page, "platform", "") == "android" and not src.startswith("file://"):
-                        src = "file://" + src.replace("\\", "/")
-                    player.src = src
-                    player.play()
-                    page.update()  # 关键：把 src/play 命令同步到客户端，否则不会出声
-                    played = True
-                except Exception as e:
-                    show_voice_error(f"播报控件出错：{e}")
-                    print(f"Flet 音频播放失败，改用系统播放器：{e}")
-
-            if not played:
+            if player is None:
+                # 没有 flet 音频控件（桌面新版 flet）：用系统播放器
                 try:
                     play_wav_via_os(tmp_path)
+                    status_text.value = f"已用系统播放器播放（{len(pcm_data)//1024}KB）"
+                    page.update()
                 except Exception as e:
                     show_voice_error(f"系统播放失败：{e}")
+                return
 
-            async def delete_later():
-                await asyncio.sleep(5)
+            plat = getattr(page, "platform", "") or ""
+            if plat == "android":
+                # 安卓优先用 base64 数据（不依赖文件路径权限），再退到 file:// / 纯路径
+                candidates = [(b64_uri, "base64数据"), (file_url, "file://路径"), (tmp_path, "纯路径")]
+            else:
+                candidates = [(tmp_path, "本地路径"), (file_url, "file://路径")]
+
+            errs = []
+            for src, label in candidates:
                 try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-            asyncio.create_task(delete_later())
+                    player.autoplay = True
+                    player.src = src
+                    page.update()          # 先把 src 下发，让客户端开始加载
+                    await asyncio.sleep(1.0)  # 等加载完成再 play，避免"还没加载就播"导致无声
+                    try:
+                        player.play()
+                        page.update()
+                    except Exception:
+                        pass
+                    status_text.value = f"已播放（{label}，{len(pcm_data)//1024}KB）"
+                    page.update()
+                    return
+                except Exception as e:
+                    errs.append(f"{label}: {e}")
+
+            show_voice_error("播放失败：" + "；".join(errs)[:220])
         except Exception as e:
-            print(f"播放异常：{e}")
+            show_voice_error(f"播放异常：{e}")
+        finally:
+            if tmp_path:
+                async def delete_later():
+                    await asyncio.sleep(20)
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                asyncio.create_task(delete_later())
 
     async def do_tts(text: str):
         try:
@@ -375,7 +399,7 @@ def main(page: ft.Page):
             else:
                 status_text.value = f"已合成语音（{len(pcm_data) // 1024}KB），播放中…"
                 page.update()
-                play_pcm_as_wav(pcm_data)
+                await play_pcm_as_wav(pcm_data)
         except Exception as e:
             show_voice_error(f"语音任务异常：{e}")
 
