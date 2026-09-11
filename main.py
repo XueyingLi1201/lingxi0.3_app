@@ -321,33 +321,40 @@ def main(page: ft.Page):
         page.update()
         print(msg)
 
-    async def play_pcm_as_wav(pcm_data: bytes):
-        """播放 PCM：依次尝试多种 src 形式，并显示实际使用的是哪一种。"""
-        if not pcm_data:
-            show_voice_error("合成结果为空，没有音频可播")
-            return
+    def make_tone_wav(seconds=1.2, freq=440.0, rate=24000) -> bytes:
+        """生成一段本地测试音（正弦波 WAV），用于验证播放通道是否正常。"""
+        import io
+        import math
+        import struct
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            frames = bytearray()
+            for i in range(int(rate * seconds)):
+                v = int(11000 * math.sin(2 * math.pi * freq * i / rate))
+                frames += struct.pack("<h", v)
+            wf.writeframes(bytes(frames))
+        return buf.getvalue()
+
+    async def play_wav_bytes(wav_bytes: bytes, tag: str = ""):
+        """把 WAV 字节交给播放器：依次尝试 base64 / file:// / 纯路径，并显示用了哪种。"""
         tmp_path = None
         try:
             import base64 as _b64
-            import wave
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(wav_bytes)
                 tmp_path = tmp.name
-                with wave.open(tmp.name, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(24000)
-                    wf.writeframes(pcm_data)
-            with open(tmp_path, "rb") as f:
-                wav_bytes = f.read()
             file_url = "file://" + tmp_path.replace("\\", "/")
             b64_uri = "data:audio/wav;base64," + _b64.b64encode(wav_bytes).decode()
 
             player = get_audio_player()
             if player is None:
-                # 没有 flet 音频控件（桌面新版 flet）：用系统播放器
                 try:
                     play_wav_via_os(tmp_path)
-                    status_text.value = f"已用系统播放器播放（{len(pcm_data)//1024}KB）"
+                    status_text.value = f"已用系统播放器播放{tag}"
                     page.update()
                 except Exception as e:
                     show_voice_error(f"系统播放失败：{e}")
@@ -355,7 +362,6 @@ def main(page: ft.Page):
 
             plat = getattr(page, "platform", "") or ""
             if plat == "android":
-                # 安卓优先用 base64 数据（不依赖文件路径权限），再退到 file:// / 纯路径
                 candidates = [(b64_uri, "base64数据"), (file_url, "file://路径"), (tmp_path, "纯路径")]
             else:
                 candidates = [(tmp_path, "本地路径"), (file_url, "file://路径")]
@@ -365,14 +371,14 @@ def main(page: ft.Page):
                 try:
                     player.autoplay = True
                     player.src = src
-                    page.update()          # 先把 src 下发，让客户端开始加载
-                    await asyncio.sleep(1.0)  # 等加载完成再 play，避免"还没加载就播"导致无声
+                    page.update()
+                    await asyncio.sleep(1.0)  # 等客户端加载完成再 play
                     try:
                         player.play()
                         page.update()
                     except Exception:
                         pass
-                    status_text.value = f"已播放（{label}，{len(pcm_data)//1024}KB）"
+                    status_text.value = f"已下发播放{tag}（{label}，{len(wav_bytes)//1024}KB）"
                     page.update()
                     return
                 except Exception as e:
@@ -390,6 +396,58 @@ def main(page: ft.Page):
                     except Exception:
                         pass
                 asyncio.create_task(delete_later())
+
+    async def play_pcm_as_wav(pcm_data: bytes):
+        if not pcm_data:
+            show_voice_error("合成结果为空，没有音频可播")
+            return
+        import io as _io
+        import wave
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(pcm_data)
+        await play_wav_bytes(buf.getvalue(), tag=f"（TTS {len(pcm_data)//1024}KB）")
+
+    async def test_local_tone():
+        """测试按钮：播放本地生成的测试音，验证播放通道本身是否可用。"""
+        try:
+            status_text.value = "正在播放本地测试音…"
+            page.update()
+            await play_wav_bytes(make_tone_wav(), tag="（本地测试音）")
+        except Exception as e:
+            show_voice_error(f"测试音失败：{e}")
+
+    async def test_remote_audio():
+        """测试按钮：播放联网音频（已知可用的远端 URL），验证网络音频能否出声。"""
+        urls = [
+            "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+            "https://interactive-examples.mdn.mozilla.net/media/cc0-audio/t-rex-roar.mp3",
+        ]
+        player = get_audio_player()
+        if player is None:
+            show_voice_error("当前 flet 没有音频控件，无法测试联网音频")
+            return
+        errs = []
+        for url in urls:
+            try:
+                player.autoplay = True
+                player.src = url
+                page.update()
+                await asyncio.sleep(1.0)
+                try:
+                    player.play()
+                    page.update()
+                except Exception:
+                    pass
+                status_text.value = f"已下发联网音频：{url[:40]}…"
+                page.update()
+                return
+            except Exception as e:
+                errs.append(str(e))
+        show_voice_error("联网音频失败：" + "；".join(errs)[:200])
 
     async def do_tts(text: str):
         try:
@@ -650,7 +708,22 @@ def main(page: ft.Page):
         bgcolor="#f5f5f5",
     )
 
-    page.add(app_bar, chat_wrapper, status_text, input_row)
+    test_row = ft.Row(
+        controls=[
+            ft.TextButton(
+                "🎵 本地测试音",
+                on_click=lambda e: asyncio.create_task(test_local_tone()),
+            ),
+            ft.TextButton(
+                "🌐 联网测试音",
+                on_click=lambda e: asyncio.create_task(test_remote_audio()),
+            ),
+        ],
+        spacing=4,
+        alignment=ft.MainAxisAlignment.START,
+    )
+
+    page.add(app_bar, chat_wrapper, test_row, status_text, input_row)
 
 if __name__ == "__main__":
     ft.app(target=main)
